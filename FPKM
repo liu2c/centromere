@@ -1,0 +1,92 @@
+#!/bin/bash
+featureCounts_soft=/public/home/shangLG/software/anaconda3/envs/subread_lcc/bin/featureCounts
+gffread_soft=/public/home/lixiaoX/software/annovar/cufflinks-2.2.1.Linux_x86_64/gffread
+hisat2_path=/public/home/lixiaoX/liucongcong/software/hisat2-2.2.0
+featureCounts=/public/home/shangLG/software/anaconda3/envs/subread_lcc/bin/featureCounts
+Rscript=/public/home/shangLG/software/anaconda3/envs/R4/bin/Rscript
+samtools=/public/home/lixiaoX/software/new/bin/samtools
+stringtie=/public/home/lixiaoX/software/stringtie-2.2.1.Linux_x86_64/stringtie
+
+DIR=$PWD
+
+parameters=$(getopt -o r:f:g:qt:h -l ref:,fqfile:,gff:,quantify,thread:,help -n "$0" -- "$@")
+[ $? != 0 ] && exit 1
+eval set -- "$parameters"   # 将$parameters设置为位置参数
+
+while true ; do             # 循环解析位置参数
+    case "$1" in
+        -h|--help)     echo  "
+FPKM.sh      usage : FPKM.sh -r NIP.fa -f file -g nip.gff
+
+ref:            -r|--ref                必选参数：参考基因组序列，fasta格式
+fqfile:         -f|--fqfile             必选参数：三列文件，第一列样本名ID，第二列和第三列fastq数据（加上路径）,TAB分隔符
+gff:            -g|--gff                必选参数：基因注释文件
+thread:         [-t|--thread]           可选参数：每个任务的线程数
+quantify:       [-m|--merge]            非选项参数：合并stringtie结果
+help:           [-h|--help]             非选项参数
+"                       ;exit 1;          shift 1 ;;   # 非选项参数的选项
+        -r|--ref)     REF_fa=$2 ;         shift 2 ;;   # 带参数的选项
+        -f|--fqfile)      FQ_File=$2 ;    shift 2 ;;   # 带参数的选项
+        -g|--gff)      GFF=$2 ;    shift 2 ;;   # 带参数的选项
+        -t|--thread)      
+            case "$2" in
+                "")     shift 2 ;;  # 没有给可选参数
+                *)      NT=$2 ;    shift 2 ;;   # 带参数的选项
+            esac;;
+        -q|--quantify) 
+            if [[ -z $REF_fa  && -z $FQ_File && -z $GFF ]];then      
+                cd $DIR
+                test ! -d counts && mkdir -p counts ; cd counts
+                find $DIR -name  "*count" | xargs -n1 ln -s 
+                $Rscript /public/home/lixiaoX/liucongcong/shell_script/bin/FPKM.r 
+            fi
+                exit 1 ; shift 1 ;;
+        --)  break ;;       # 开始解析非选项类型的参数，break后，它们都保留在$@中
+        *) echo "wrong";exit 1;;
+    esac
+done
+
+if [[ $NT == "" ]];then NT=5 ; fi
+
+if [[ $REF_fa != "" && $FQ_File != "" && $GFF != "" && $quantify == "" ]];then
+    #建索引,转GTF格式
+    mkdir -p $DIR/index
+    PREFIX=$(echo $REF_fa | awk -F/ '{print $NF}' )
+    if [[ $(ls $DIR/index/$PREFIX*ht2 |wc -l) -ne 8  ]];then
+        $hisat2_path/hisat2-build -p 20 $REF_fa $DIR/index/$PREFIX
+    fi
+    
+    if [[ ! -f  $DIR/index/$GFF.gtf ]];then
+        $gffread_soft $GFF -T -o $DIR/index/$GFF.gtf
+    fi
+
+    #align
+    cat $FQ_File | while read line;do
+
+        read PREFIX1 FQ_clean_1 FQ_clean_2 <<< $line
+        mkdir -p $DIR/$PREFIX1
+
+        echo "
+    if [[ ! -f  $DIR/$PREFIX1/$PREFIX1.hisat.bam ]];then
+
+        if [[ ! -f  $DIR/$PREFIX1/$PREFIX1.hisat.sam ]];then
+            $hisat2_path/hisat2 -p $NT --dta -x $DIR/index/$PREFIX -1 $FQ_clean_1 -2 $FQ_clean_2 --new-summary --summary-file $DIR/$PREFIX1/$PREFIX1.ht2.txt -S $DIR/$PREFIX1/$PREFIX1.hisat.sam
+        fi
+
+        $samtools sort -O bam -@ $NT -o $DIR/$PREFIX1/$PREFIX1.hisat.bam $DIR/$PREFIX1/$PREFIX1.hisat.sam
+        ls $DIR/$PREFIX1/$PREFIX1.hisat.sam && rm $DIR/$PREFIX1/$PREFIX1.hisat.sam
+
+    fi
+    $stringtie $DIR/$PREFIX1/$PREFIX1.hisat.bam -o $DIR/$PREFIX1/$PREFIX1.gtf  -p $NT -G $DIR/index/$GFF.gtf -e -A $DIR/$PREFIX1/$PREFIX1.file
+    
+    "  > $DIR/$PREFIX1/$PREFIX1.hisat2.gtf.sh
+    #$featureCounts -a $DIR/index/$GFF.gtf  -o $DIR/$PREFIX1/$PREFIX1.count -T $NT -p -t exon -g gene_id $DIR/$PREFIX1/$PREFIX1.hisat.bam
+            #挂到集群分批运行比对
+            #cd $DIR/$PREFIX1 && cluster1 $PREFIX1.hisat2.gtf.sh 1 $NT
+
+    done
+else
+    echo "wrong parameters"
+fi
+
+
